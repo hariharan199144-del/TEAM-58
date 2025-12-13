@@ -1,0 +1,7 @@
+{
+  "name": "Auralex",
+  "description": "Transforms audio content into personalized learning materials using AI-powered natural language processing.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
