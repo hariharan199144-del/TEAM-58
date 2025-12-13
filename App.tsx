@@ -59,6 +59,51 @@ const LuxuryLogo = ({ className }: { className?: string }) => (
   </svg>
 );
 
+// --- COMPONENT: NOTIFICATION TOAST ---
+const NotificationToast = ({ 
+  message, 
+  type, 
+  onClose 
+}: { 
+  message: string, 
+  type: 'error' | 'success', 
+  onClose: () => void 
+}) => {
+  useEffect(() => {
+    const timer = setTimeout(onClose, 6000); // Auto close after 6s
+    return () => clearTimeout(timer);
+  }, [onClose]);
+
+  return (
+    <div className="fixed top-6 left-1/2 -translate-x-1/2 z-[70] animate-slide-up w-full max-w-sm px-4">
+      <div className={`p-4 rounded-xl shadow-2xl border flex items-start gap-3 backdrop-blur-md ${
+        type === 'error' 
+          ? 'bg-white/95 border-red-100 text-red-800' 
+          : 'bg-white/95 border-sage-200 text-sage-800'
+      }`}>
+        <div className={`mt-0.5 w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0 ${
+          type === 'error' ? 'bg-red-100' : 'bg-sage-100'
+        }`}>
+          {type === 'error' ? (
+            <XIcon className="w-3 h-3 text-red-600" />
+          ) : (
+            <CheckIcon className="w-3 h-3 text-sage-600" />
+          )}
+        </div>
+        <div className="flex-1">
+            <h4 className="text-sm font-bold uppercase tracking-wider mb-1">
+                {type === 'error' ? 'Attention' : 'Success'}
+            </h4>
+            <p className="text-sm font-light leading-snug opacity-90">{message}</p>
+        </div>
+        <button onClick={onClose} className="text-current opacity-40 hover:opacity-100">
+            <XIcon className="w-4 h-4" />
+        </button>
+      </div>
+    </div>
+  );
+};
+
 // --- COMPONENT: LUXURY AUDIO PLAYER ---
 const LuxuryAudioPlayer = ({ src }: { src: string }) => {
     const audioRef = useRef<HTMLAudioElement>(null);
@@ -1297,6 +1342,9 @@ export default function App() {
   const [historyStack, setHistoryStack] = useState<Screen[]>([]);
   const [isSyncing, setIsSyncing] = useState(false);
   const [showSavePrompt, setShowSavePrompt] = useState(false);
+  
+  // Notification State
+  const [notification, setNotification] = useState<{message: string, type: 'error' | 'success'} | null>(null);
 
   // Load Library on Mount
   useEffect(() => {
@@ -1376,15 +1424,16 @@ export default function App() {
             URL.revokeObjectURL(url);
         }
         setShowSavePrompt(false);
+        setNotification({ type: 'success', message: 'File saved successfully.' });
       } catch (err: any) {
           if (err.name !== 'AbortError') {
               console.error("File save error:", err);
-              alert("Failed to save file. Please try again.");
+              setNotification({ type: 'error', message: "Failed to save file. Please try again." });
           }
       }
   };
 
-  const handleProcessing = async (blob: Blob) => {
+  const handleProcessing = async (blob: Blob, originScreen: Screen = 'upload') => {
     setCurrentScreen('loading'); // Note: 'loading' is transient, we don't push it to history stack
     try {
         const options: ProcessingOptions = { 
@@ -1422,8 +1471,14 @@ export default function App() {
 
     } catch (error: any) {
         console.error(error);
-        alert(error.message || "Failed to process audio. Please try again.");
-        setCurrentScreen('dashboard');
+        // Show friendly error notification
+        setNotification({ 
+            type: 'error', 
+            message: error.message || "Failed to process audio. Please try again." 
+        });
+        
+        // Return to previous screen so they can try again
+        setCurrentScreen(originScreen);
     }
   };
 
@@ -1437,9 +1492,9 @@ export default function App() {
         case 'dashboard':
             return <DashboardScreen user={user!} onNavigate={navigateTo} recentItems={savedLibrary} />;
         case 'upload':
-            return <UploadScreen onFileSelect={(file) => handleProcessing(file)} />;
+            return <UploadScreen onFileSelect={(file) => handleProcessing(file, 'upload')} />;
         case 'record':
-            return <RecordScreen onRecordingComplete={(blob) => handleProcessing(blob)} />;
+            return <RecordScreen onRecordingComplete={(blob) => handleProcessing(blob, 'record')} />;
         case 'results':
             return generatedContent ? (
                 <ResultsScreen 
@@ -1459,6 +1514,15 @@ export default function App() {
 
   return (
     <div className="flex min-h-screen bg-cream-50 text-espresso-900 font-sans selection:bg-sage-200 relative">
+      {/* Toast Notification Layer */}
+      {notification && (
+          <NotificationToast 
+            message={notification.message} 
+            type={notification.type} 
+            onClose={() => setNotification(null)} 
+          />
+      )}
+
       {/* Save Prompt Overlay */}
       {showSavePrompt && (
           <SavePromptModal 
