@@ -191,6 +191,10 @@ const LuxuryAudioPlayer = ({ src }: { src: string }) => {
 
 // --- COMPONENT: SAVE PROMPT MODAL ---
 const SavePromptModal = ({ onSave, onCancel }: { onSave: () => void, onCancel: () => void }) => {
+    // Check if the File System Access API is supported
+    // @ts-ignore
+    const supportsFileSystem = 'showSaveFilePicker' in window;
+
     return (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-espresso-900/20 backdrop-blur-sm animate-fade-in">
             <div className="bg-white rounded-2xl p-8 max-w-md w-full mx-4 shadow-2xl border border-stone-100 transform transition-all animate-slide-up">
@@ -198,10 +202,25 @@ const SavePromptModal = ({ onSave, onCancel }: { onSave: () => void, onCancel: (
                     <SaveIcon className="w-6 h-6" />
                 </div>
                 
-                <h3 className="text-xl font-serif text-espresso-900 text-center mb-2">Save to Device?</h3>
-                <p className="text-taupe-500 text-center font-light mb-8 text-sm">
-                    Would you like to save this generated content as a local file on your computer?
-                </p>
+                <h3 className="text-xl font-serif text-espresso-900 text-center mb-2">Save Analysis?</h3>
+                
+                {supportsFileSystem ? (
+                    <p className="text-taupe-500 text-center font-light mb-8 text-sm">
+                        Would you like to save this generated content as a local JSON file on your computer?
+                    </p>
+                ) : (
+                    <div className="mb-8">
+                        <p className="text-taupe-500 text-center font-light text-sm mb-4">
+                             Would you like to download this generated content?
+                        </p>
+                        <div className="bg-amber-50 border border-amber-100 rounded-xl p-4 text-center">
+                            <p className="text-amber-900 text-xs font-bold uppercase tracking-wider mb-1">Browser Notice</p>
+                            <p className="text-amber-800/80 text-xs leading-relaxed">
+                                Your browser doesn't support direct file saving. The file will be saved to your default <strong>Downloads</strong> folder.
+                            </p>
+                        </div>
+                    </div>
+                )}
 
                 <div className="flex gap-3">
                     <button 
@@ -214,7 +233,7 @@ const SavePromptModal = ({ onSave, onCancel }: { onSave: () => void, onCancel: (
                         onClick={onSave}
                         className="flex-1 py-3 bg-espresso-900 text-white rounded-xl font-medium hover:bg-espresso-800 transition-colors shadow-lg shadow-espresso-900/10"
                     >
-                        Yes, Save File
+                        {supportsFileSystem ? 'Save As...' : 'Download'}
                     </button>
                 </div>
             </div>
@@ -822,7 +841,7 @@ const UploadScreen = ({ onFileSelect }: { onFileSelect: (file: File) => void }) 
   return (
     <div className="p-8 pt-24 max-w-4xl mx-auto h-full flex flex-col animate-slide-up">
       <h2 className="text-3xl font-serif text-espresso-900 mb-2">Upload Audio</h2>
-      <p className="text-taupe-500 font-light mb-8">Supported formats: MP3, WAV, M4A, AAC</p>
+      <p className="text-taupe-500 font-light mb-8">Supported formats: MP3, WAV, M4A, AAC, FLAC, OGG (Max size: 2GB)</p>
 
       <div 
         className={`flex-1 min-h-[400px] border-2 border-dashed rounded-3xl flex flex-col items-center justify-center transition-all duration-300 ${
@@ -844,7 +863,7 @@ const UploadScreen = ({ onFileSelect }: { onFileSelect: (file: File) => void }) 
         <input 
           ref={inputRef}
           type="file" 
-          accept="audio/*,.mp3,.wav,.m4a,.aac,.webm" 
+          accept="audio/*,.mp3,.wav,.m4a,.aac,.webm,.flac,.ogg" 
           className="hidden" 
           onClick={(e) => { (e.target as HTMLInputElement).value = '' }}
           onChange={(e) => e.target.files && onFileSelect(e.target.files[0])}
@@ -862,16 +881,92 @@ const UploadScreen = ({ onFileSelect }: { onFileSelect: (file: File) => void }) 
 };
 
 // --- SCREEN: RECORDING ---
-const RecordScreen = ({ onRecordingComplete }: { onRecordingComplete: (blob: Blob) => void }) => {
+const RecordScreen = ({ 
+    onRecordingComplete, 
+    onCancel 
+}: { 
+    onRecordingComplete: (blob: Blob) => void,
+    onCancel: () => void 
+}) => {
     const [isRecording, setIsRecording] = useState(false);
     const [duration, setDuration] = useState(0);
+    const [visualizerScale, setVisualizerScale] = useState(1);
+    
     const mediaRecorder = useRef<MediaRecorder | null>(null);
     const chunks = useRef<BlobPart[]>([]);
     const timerRef = useRef<number | null>(null);
+    
+    // Audio Context Refs for Visualization
+    const audioContextRef = useRef<AudioContext | null>(null);
+    const analyserRef = useRef<AnalyserNode | null>(null);
+    const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+    const animationRef = useRef<number | null>(null);
+    const streamRef = useRef<MediaStream | null>(null);
+
+    // Cleanup function
+    useEffect(() => {
+        return () => {
+            if (mediaRecorder.current && mediaRecorder.current.state !== 'inactive') {
+                mediaRecorder.current.stop();
+            }
+            if (streamRef.current) {
+                streamRef.current.getTracks().forEach(track => track.stop());
+            }
+            if (audioContextRef.current) {
+                audioContextRef.current.close();
+            }
+            if (animationRef.current) {
+                cancelAnimationFrame(animationRef.current);
+            }
+            if (timerRef.current) {
+                clearInterval(timerRef.current);
+            }
+        };
+    }, []);
+
+    const setupVisualizer = (stream: MediaStream) => {
+        if (!audioContextRef.current) {
+            audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+        }
+        
+        const ctx = audioContextRef.current;
+        analyserRef.current = ctx.createAnalyser();
+        analyserRef.current.fftSize = 32;
+        
+        sourceRef.current = ctx.createMediaStreamSource(stream);
+        sourceRef.current.connect(analyserRef.current);
+        
+        const bufferLength = analyserRef.current.frequencyBinCount;
+        const dataArray = new Uint8Array(bufferLength);
+
+        const update = () => {
+            if (!analyserRef.current) return;
+            
+            analyserRef.current.getByteFrequencyData(dataArray);
+            
+            // Calculate average volume
+            let sum = 0;
+            for(let i = 0; i < bufferLength; i++) {
+                sum += dataArray[i];
+            }
+            const average = sum / bufferLength;
+            
+            // Map 0-255 to 1.0-1.5 scale
+            // Logarithmic feel adjustment
+            const scale = 1 + (Math.pow(average / 255, 0.8) * 0.6);
+            
+            setVisualizerScale(scale);
+            animationRef.current = requestAnimationFrame(update);
+        };
+        
+        update();
+    };
 
     const startRecording = async () => {
         try {
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            streamRef.current = stream;
+            
             mediaRecorder.current = new MediaRecorder(stream);
             chunks.current = [];
 
@@ -883,6 +978,8 @@ const RecordScreen = ({ onRecordingComplete }: { onRecordingComplete: (blob: Blo
                 const blob = new Blob(chunks.current, { type: 'audio/webm' });
                 onRecordingComplete(blob);
                 stream.getTracks().forEach(track => track.stop());
+                if (audioContextRef.current) audioContextRef.current.close();
+                if (animationRef.current) cancelAnimationFrame(animationRef.current);
             };
 
             mediaRecorder.current.start();
@@ -891,6 +988,9 @@ const RecordScreen = ({ onRecordingComplete }: { onRecordingComplete: (blob: Blo
             timerRef.current = window.setInterval(() => {
                 setDuration(prev => prev + 1);
             }, 1000);
+            
+            setupVisualizer(stream);
+            
         } catch (err) {
             console.error("Microphone access denied", err);
             alert("Please enable microphone access to record audio.");
@@ -912,37 +1012,57 @@ const RecordScreen = ({ onRecordingComplete }: { onRecordingComplete: (blob: Blo
     };
 
     return (
-        <div className="p-8 pt-24 max-w-4xl mx-auto h-full flex flex-col items-center justify-center animate-fade-in text-center">
-             <div className="mb-12 relative">
+        <div className="p-8 pt-24 max-w-4xl mx-auto h-full flex flex-col items-center justify-center animate-fade-in text-center relative">
+             <div className="mb-12 relative z-10">
+                {/* Visualizer Backing */}
                 {isRecording && (
-                    <div className="absolute inset-0 rounded-full bg-sage-400/20 animate-ping" />
+                    <div 
+                        className="absolute inset-0 rounded-full bg-sage-400/20 blur-xl transition-transform duration-75 will-change-transform"
+                        style={{ transform: `scale(${visualizerScale * 1.5})` }}
+                    />
                 )}
-                <div className={`relative w-40 h-40 rounded-full flex items-center justify-center transition-all duration-500 ${isRecording ? 'bg-sage-50 text-sage-600' : 'bg-espresso-50 text-espresso-900'}`}>
+                
+                {/* Main Icon Circle */}
+                <div 
+                    className={`relative w-40 h-40 rounded-full flex items-center justify-center transition-all duration-300 will-change-transform ${isRecording ? 'bg-sage-50 text-sage-600 shadow-2xl shadow-sage-200' : 'bg-espresso-50 text-espresso-900'}`}
+                    style={isRecording ? { transform: `scale(${visualizerScale})` } : {}}
+                >
                     <MicIcon className="w-16 h-16" />
                 </div>
              </div>
 
-             <div className="text-6xl font-serif font-medium tabular-nums text-espresso-900 mb-4 tracking-tight">
+             <div className="text-6xl font-serif font-medium tabular-nums text-espresso-900 mb-4 tracking-tight relative z-10">
                  {formatTime(duration)}
              </div>
-             <p className="text-taupe-500 mb-12 font-light text-lg">
+             <p className="text-taupe-500 mb-12 font-light text-lg relative z-10">
                  {isRecording ? "Recording in progress..." : "Ready to capture high-fidelity audio"}
              </p>
 
-             <button
-                onClick={isRecording ? stopRecording : startRecording}
-                className={`px-12 py-4 rounded-full font-medium text-lg tracking-wide transition-all duration-300 shadow-xl ${
-                    isRecording 
-                    ? 'bg-red-500 hover:bg-red-600 text-white shadow-red-500/20' 
-                    : 'bg-espresso-900 hover:bg-espresso-800 text-white shadow-espresso-900/20'
-                }`}
-             >
-                 {isRecording ? (
-                     <span className="flex items-center gap-3"><StopIcon className="w-5 h-5" /> Stop Recording</span>
-                 ) : (
-                     <span className="flex items-center gap-3"><PlayIcon className="w-5 h-5" /> Start Recording</span>
+             <div className="flex gap-4 relative z-10">
+                 {isRecording && (
+                    <button
+                        onClick={onCancel}
+                        className="px-8 py-4 rounded-full font-medium text-lg tracking-wide transition-all duration-300 bg-stone-100 text-taupe-600 hover:bg-stone-200"
+                    >
+                        Cancel
+                    </button>
                  )}
-             </button>
+
+                 <button
+                    onClick={isRecording ? stopRecording : startRecording}
+                    className={`px-12 py-4 rounded-full font-medium text-lg tracking-wide transition-all duration-300 shadow-xl ${
+                        isRecording 
+                        ? 'bg-red-500 hover:bg-red-600 text-white shadow-red-500/20' 
+                        : 'bg-espresso-900 hover:bg-espresso-800 text-white shadow-espresso-900/20'
+                    }`}
+                 >
+                     {isRecording ? (
+                         <span className="flex items-center gap-3"><StopIcon className="w-5 h-5" /> Stop Recording</span>
+                     ) : (
+                         <span className="flex items-center gap-3"><PlayIcon className="w-5 h-5" /> Start Recording</span>
+                     )}
+                 </button>
+             </div>
         </div>
     );
 };
@@ -1197,7 +1317,7 @@ const QuizView = ({ quiz }: { quiz: QuizItem[] }) => {
     );
 };
 
-// --- SCREEN: RESULTS ---
+// --- RESULTS SCREEN ---
 const ResultsScreen = ({ 
     content, 
     isSyncing, 
@@ -1279,6 +1399,12 @@ const ResultsScreen = ({
                 <div className="mb-12 max-w-2xl">
                     <LuxuryAudioPlayer src={content.audioDataUrl} />
                 </div>
+            )}
+            {!content.audioDataUrl && (
+                 <div className="mb-12 max-w-2xl p-4 bg-cream-100 rounded-xl border border-sage-100 text-sm text-taupe-500 flex items-center gap-3">
+                    <FileAudioIcon className="w-5 h-5 opacity-50" />
+                    Audio playback is disabled for large files to optimize performance.
+                 </div>
             )}
 
             {/* Layout Grid */}
@@ -1445,21 +1571,33 @@ export default function App() {
         };
         const result = await generateLearningMaterial(blob, options);
         
-        // Convert Blob to Data URL for playback
-        const audioDataUrl = await blobToDataUrl(blob);
+        // OPTIMIZATION: Handle Audio Data for Playback
+        // 1. If small (< 5MB), convert to Base64 (Data URL). This can be saved to LocalStorage.
+        // 2. If large, use Blob URL for current session. It won't persist after reload, preventing storage quotas/crashes.
+        let audioDataUrl: string | undefined;
+        const STORAGE_SAFE_LIMIT = 5 * 1024 * 1024; // 5MB
+
+        if (blob.size < STORAGE_SAFE_LIMIT) {
+             audioDataUrl = await blobToDataUrl(blob);
+        } else {
+            // Create temporary URL for immediate playback
+            audioDataUrl = URL.createObjectURL(blob);
+        }
 
         // Add ID and Date
         const fullContent: GeneratedContent = {
             ...result,
             id: Date.now().toString(),
             date: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
-            audioDataUrl // Save audio for playback
+            audioDataUrl // Save audio for playback (or blob url)
         };
         
         setGeneratedContent(fullContent);
         
         // Save to Database (Async)
         setIsSyncing(true);
+        // Note: storageService handles stripping audioDataUrl if quota exceeded
+        // If it's a blob url, it saves fine but becomes invalid on reload.
         const updatedLib = await storageService.saveContent(fullContent);
         setSavedLibrary(updatedLib);
         setIsSyncing(false);
@@ -1494,7 +1632,10 @@ export default function App() {
         case 'upload':
             return <UploadScreen onFileSelect={(file) => handleProcessing(file, 'upload')} />;
         case 'record':
-            return <RecordScreen onRecordingComplete={(blob) => handleProcessing(blob, 'record')} />;
+            return <RecordScreen 
+                onRecordingComplete={(blob) => handleProcessing(blob, 'record')} 
+                onCancel={() => navigateTo('dashboard')}
+            />;
         case 'results':
             return generatedContent ? (
                 <ResultsScreen 
